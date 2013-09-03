@@ -1,0 +1,13 @@
+; config file for home energy monitoring system
+; Change values to suit
+
+[general]
+lat = -32.0
+lon = 115.9
+
+[pvoutput]
+API_Key = 0123456789abcdef0123456789abcdef
+System_Id = 12345
+
+[inverter]
+port = /dev/ttyUSB0
