@@ -14,7 +14,8 @@ Features
 Thanks
 ------
 Development of this software was aided by:
-* 
+* DennisMackayFisher thanks to the source of http://code.google.com/p/pvbeancounter/
 
-
-
+Licence
+-------
+GPL3+
