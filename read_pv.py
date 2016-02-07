@@ -21,9 +21,6 @@ SYSTEMID = config.get('pvoutput','SYSTEMID')
 APIKEY = config.get('pvoutput','APIKEY')
 port = config.get('connection','Inverter')
 
-t_date = format(time.strftime('%Y%m%d'))
-t_time = format(time.strftime('%H:%M'))
-
 check = time.time()
 interval = 300
 com_str='None'
@@ -43,6 +40,8 @@ statetxt = {0: "Waiting", 1: "Normal", 3: "Fault"}
 def post_pvoutput():
     # we only attempt to upload to pvoutput if inverter online
     if invstate == 1:
+        t_date = format(time.strftime('%Y%m%d'))
+        t_time = format(time.strftime('%H:%M'))
         pv_headers = {'X-Pvoutput-Apikey': APIKEY, 'X-Pvoutput-SystemId':SYSTEMID }
         payload1 = {'d':t_date, 't':t_time, 'v1':(info['Etoday']*1000), 'v2':info['Pac'], 'v5':info['Tinverter'], 'v6':info['Vpv1'], 'c1':0, 'v7':info['Vac1'], 'v8':info['Fac'] }
         r = requests.post('http://pvoutput.org/service/r2/addstatus.jsp',headers=pv_headers,data=payload1)
