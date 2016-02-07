@@ -33,7 +33,7 @@ topic = config.get('mqtt','topic')
 mqttc.loop_start()
 
 # default state at poweron will be 'waiting'
-laststate = 1
+laststate = 0
 statetxt = {0: "Waiting", 1: "Normal", 3: "Fault"}
 
 
