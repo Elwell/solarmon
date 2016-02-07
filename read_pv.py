@@ -1,105 +1,133 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+
+ # new improved version that should run in background and poll / post on timer loop rather than one-off via cron
+
 import time
 import ConfigParser
 from pymodbus.client.sync import ModbusSerialClient as ModbusClient
-from pyowm import OWM
 import requests
+import paho.mqtt.client as mqtt
+
+errcodes = {24: 'Auto Test Failed', 25:'No AC Connection', 26: 'PV Isolation Low', 27:'Residual Current High',
+		28:'DC Current High', 29: 'PV Voltage High', 30: 'AV V Outrange', 31: 'AC Freq Outrange', 32: 'Module Hot'}
+# errcodes 1-23 are 'Error: (errorcode+99)
+
 
 # read settings from config file
 config = ConfigParser.ConfigParser()
 config.read('/boot/pvoutput.txt')
 SYSTEMID = config.get('pvoutput','SYSTEMID')
 APIKEY = config.get('pvoutput','APIKEY')
-OWMKey = config.get('weather','Key')
-OWMLon = float(config.get('weather','Longitude'))
-OWMLat = float(config.get('weather','Latitude'))
-NoInvert = int(config.get('connection','Inverters'))
+port = config.get('connection','Inverter')
 
 t_date = format(time.strftime('%Y%m%d'))
 t_time = format(time.strftime('%H:%M'))
 
-#pv_volts=0.0
-#pv_power=0.0
-#Wh_today=0
-#current_temp=0.0
+check = time.time()
+interval = 300
 com_str='None'
 
-for i in range(NoInvert):
+
+# connect to MQTT Broker
+mqttc = mqtt.Client()
+mqttc.connect(config.get('mqtt','broker'))
+topic = config.get('mqtt','topic')
+mqttc.loop_start()
+
+# default state at poweron will be 'waiting'
+laststate = 1
+statetxt = {0: "Waiting", 1: "Normal", 3: "Fault"}
+
+
+def post_pvoutput():
+    # we only attempt to upload to pvoutput if inverter online
+    if invstate == 1:
+        pv_headers = {'X-Pvoutput-Apikey': APIKEY, 'X-Pvoutput-SystemId':SYSTEMID }
+        payload1 = {'d':t_date, 't':t_time, 'v1':(info['Etoday']*1000), 'v2':info['Pac'], 'v5':info['Tinverter'], 'v6':info['Vpv1'], 'c1':0, 'v7':info['Vac1'], 'v8':info['Fac'] }
+        r = requests.post('http://pvoutput.org/service/r2/addstatus.jsp',headers=pv_headers,data=payload1)
+        print r.content,payload1
+    else:
+        print "Not uploading to pvoutput - Inverter Status != Normal"
+
 # Read data from inverter
 # pdf says that we can't read more than 45 registers in one go.
-  inverter = ModbusClient(method='rtu', port='/dev/ttyUSB'+str(i), baudrate=9600, stopbits=1, parity='N', bytesize=8, timeout=1)
-  inverter.connect()
-  rr = inverter.read_input_registers(0,45)
-  inverter.close()
-  print rr.registers
-  invstate=rr.registers[0]
-  if invstate == 0:
-	print "Inverter State: Waiting - insufficent output"
-  elif invstate == 3:
-	print "Inverter State: FAULT"
-  elif invstate == 1:
-	print "Inverter State: Normal"
-  else:
-	print "WARNING: Unknown Inverter Status"
+inverter = ModbusClient(method='rtu', port=port, baudrate=9600, stopbits=1, parity='N', bytesize=8, timeout=1)
+inverter.connect()
+while True:
+  try:
+    now = time.time()
+    info = {} # we'll build this up with the parsed output from the registers
+    rr = inverter.read_input_registers(0,33)
+    #print rr.registers
+    invstate=rr.registers[0]
+    info['Status'] = statetxt[invstate]
+    mqttc.publish(topic + '/status', statetxt[invstate])
+    if (invstate != laststate):
+        print "Changed state from %s to %s" % (laststate, invstate)
+        pushover = {'token':config.get('pushover','app_token'), 'user':config.get('pushover','user_key'), 'title': 'Inverter debug', 'priority': -1,
+		'message': "State changed from " + statetxt[laststate] + " to "+ statetxt[invstate], 'url':'http://pvoutput.org/intraday.jsp?sid=22888'}
+        r = requests.post('https://api.pushover.net/1/messages.json',data=pushover)
+        print r.content
+        if invstate == 3:
+            EC = inverter.read_input_registers(40,1)
+            if 1 <= EC <= 23: # No specific text defined
+                errstr = "Error Code " + str(99+EC)
+            else:
+                errstr = errcodes[EC.registers[0]]
+            print "Inverter FAULT: %s" % errstr
+            pushover = {'token':config.get('pushover','app_token'), 'user':config.get('pushover','user_key'), 'title': 'Inverter Fault', 'message': errstr }
+            r = requests.post('https://api.pushover.net/1/messages.json',data=pushover)
+            print r.content
+        laststate = invstate
 
-  Ppv = float((rr.registers[1]<<8) + rr.registers[2])/10 # Input Power
-  print 'Ppv: %s W' % Ppv
+    info['Ppv'] = float((rr.registers[1]<<16) + rr.registers[2])/10 # Input Power
 
-  Vpv1 = float(rr.registers[3])/10 # PV1 Voltage
-  PV1Curr = float(rr.registers[4])/10 # PV1 Input Current
-  PV1Watt = float((rr.registers[5]<<8) + rr.registers[6])/10 # PV1 input watt
+    info['Vpv1'] = float(rr.registers[3])/10 # PV1 Voltage
+    info['PV1Curr'] = float(rr.registers[4])/10 # PV1 Input Current
+    info['PV1Watt'] = float((rr.registers[5]<<16) + rr.registers[6])/10 # PV1 input watt
 
-  print 'Vpv1: %s V' % Vpv1
-  print 'PV1Curr: %s A' % PV1Curr
-  print 'PV1Watt: %s W' % PV1Watt
+    # PV2 would be the same, but I only have one string connected
+    #info['Vpv2'] = float(rr.registers[7])/10
+    #info['PV2Curr'] = float(rr.registers[8])/10
+    #info['PV2Watt'] = float((rr.registers[9]<<16) + rr.registers[10])/10
 
-  # PV2 would be the same, but I only have one string connected
-  Vpv2 = float(rr.registers[7])/10
-  PV2Curr = float(rr.registers[8])/10
-  PV2Watt = float((rr.registers[9]<<8) + rr.registers[10])/10
-  #print 'Vpv2: %s V' % Vpv2
-  #print 'PV2Curr: %s A' % PV2Curr
-  #print 'PV2Watt: %s W' % PV2Watt
+    # Total outputs for the inverter
+    info['Pac'] = float((rr.registers[11]<<16) + rr.registers[12])/10 # Output Power
+    info['Fac'] = float(rr.registers[13])/100 # Grid Frequency
 
-  Pac = float((rr.registers[11]<<8) + rr.registers[12])/10 # Output Power
-  Fac = float(rr.registers[13])/100 # Grid Frequency
-  Vac1 = float(rr.registers[14])/10 # Single Phase grid voltage
-  Iac1 = float(rr.registers[15])/10 # Single Phase grid output current
-  Pac1 = float((rr.registers[16]<<8) + rr.registers[17])/10 # Single Phase grid output watt
+    # Single phase users just see the 1st set of these
+    info['Vac1'] = float(rr.registers[14])/10 # Single Phase (L1) grid voltage
+    info['Iac1'] = float(rr.registers[15])/10 # Single Phase (L1) grid output current
+    info['Pac1'] = float((rr.registers[16]<<16) + rr.registers[17])/10 # Single Phase (L1) grid output watt
 
-  print 'Pac: %s W' % Pac
-  print 'Fac: %s Hz' % Fac
-  print 'Vac1: %s V' % Vac1
-  print 'Iac1: %s A' % Iac1
-  print 'Pac1: %s VA' % Pac1
+    #info['Vac2'] = float(rr.registers[18])/10 # L2 grid voltage
+    #info['Iac2'] = float(rr.registers[19])/10 # L2 grid output current
+    #info['Pac2'] = float((rr.registers[20]<<16) + rr.registers[21])/10 # L2 grid output watt
 
-  Etoday = float((rr.registers[26]<<8) + rr.registers[27])/10
-  Etotal = float((rr.registers[28]<<8) + rr.registers[29])/10
-  ttotal = float((rr.registers[30]<<8) + rr.registers[31])/2
-  Tinverter = float(rr.registers[32])/10
+    #info['Vac3'] = float(rr.registers[22])/10 # L3 grid voltage
+    #info['Iac3'] = float(rr.registers[23])/10 # L3 grid output current
+    #info['Pac3'] = float((rr.registers[24]<<16) + rr.registers[25])/10 # L3 grid output watt
 
-  print "Etoday: %s KWh, Etotal: %s KWh, Total Time: %s s, Inverter Temp: %s C" % (Etoday,Etotal,ttotal,Tinverter)
+    info['Etoday'] = float((rr.registers[26]<<16) + rr.registers[27])/10
+    info['Etotal'] = float((rr.registers[28]<<16) + rr.registers[29])/10
+    info['ttotal'] = float((rr.registers[30]<<16) + rr.registers[31])/2 # seconds
+    info['Tinverter'] = float(rr.registers[32])/10  # Inverter temp
+
+    #print info
+    mqttc.publish(topic + '/raw', str(info))
+
+    if (((now - check) % interval) < 2):
+          post_pvoutput()
+          check = now
+
+  #except SerialException:
+  except:
+     print 'Serial Read Error?'
+  time.sleep(1)
 
 
 
-if OWMKey<>'':
-  owm = OWM(API_key=OWMKey)
-  obs = owm.weather_at_coords(OWMLat, OWMLon)
-  w = obs.get_weather()
-  w_stat = w.get_detailed_status()
-  temp = w.get_temperature(unit='celsius')
-  current_temp = temp['temp']
-  cloud_pct = w.get_clouds()
-  com_str= ('%s with a cloud coverage of %s percent' %(w_stat,cloud_pct))
 
-pv_headers = {'X-Pvoutput-Apikey': APIKEY, 'X-Pvoutput-SystemId':SYSTEMID }
-payload1 = {'d':t_date, 't':t_time, 'v1':Etoday, 'v2':Pac, 'v5':Tinverter, 'v6':Vpv1, 'c1':0, 'v7':Vac1, 'v8':Fac }
-print payload1
-r = requests.post('http://pvoutput.org/service/r2/addstatus.jsp',headers=pv_headers,data=payload1)
-print r.content
-
-if Etoday>0:
-  payload2 = {'d':t_date, 'g':Etoday, 'cm':com_str, 'cd':w_stat}
-  r = requests.post('http://pvoutput.org/service/r2/addoutput.jsp',headers=pv_headers,data=payload2)
-  print r.content
+mqttc.loop_stop()
+inverter.close()
