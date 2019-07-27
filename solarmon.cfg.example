@@ -11,3 +11,7 @@ System_Id = 12345
 
 [inverter]
 port = /dev/ttyUSB0
+
+[mqtt]
+broker = 192.0.2.100
+topic = monitoring/solar
